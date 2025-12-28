@@ -2,44 +2,66 @@
 
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\StudentController;
-use App\Http\Controllers\ClassController; // Assuming you have this
+use App\Http\Controllers\ClassController;
+use App\Models\ActivityLog; 
+use App\Models\Student;
+use App\Models\SchoolClass;
 
 /*
 |--------------------------------------------------------------------------
 | Web Routes
 |--------------------------------------------------------------------------
-|
-| Here is where you can register web routes for your application.
-| These routes are loaded by the RouteServiceProvider and all will be
-| assigned to the "web" middleware group. Make something great!
-|
 */
 
-// Public routes (no auth required)
+// Public routes
 Route::get('/', function () {
     return view('welcome');
 })->name('home');
 
-// Authentication routes (Breeze/Jetstream default)
+// Authentication routes
 require __DIR__.'/auth.php';
 
-// Protected routes (authenticated + verified users only)
+// Protected routes
 Route::middleware(['auth', 'verified'])->group(function () {
-    // Dashboard
+    
+    // --- DASHBOARD LOGIC ---
     Route::get('/dashboard', function () {
-        return view('dashboard');
+        // 1. Get Stats
+        $totalStudents = Student::count();
+        $totalClasses = SchoolClass::count();
+        $activeStudents = Student::whereNotNull('class_id')->count();
+        $newStudents = Student::whereMonth('created_at', now()->month)->count();
+
+        // 2. Get Recent Activity (Top 5)
+        $activities = ActivityLog::with('user')->latest()->take(5)->get();
+
+        // 3. Send to view
+        return view('dashboard', compact(
+            'totalStudents', 
+            'totalClasses', 
+            'activeStudents', 
+            'newStudents', 
+            'activities'
+        ));
     })->name('dashboard');
 
-    // Students - full CRUD + bulk delete
+    // --- ACTIVITY LOGS (VIEW ALL) ---
+    Route::get('/activity-logs', function () {
+        // Fetch all logs, 20 per page
+        $activities = ActivityLog::with('user')->latest()->paginate(20);
+        return view('activity_logs.index', compact('activities'));
+    })->name('activity_logs.index');
+
+    // Students
     Route::resource('students', StudentController::class);
     Route::post('students/bulk-destroy', [StudentController::class, 'bulkDestroy'])
         ->name('students.bulkDestroy');
 
-    // Classes - full CRUD
+    // Classes
     Route::resource('classes', ClassController::class);
 });
 
-// Optional redirect after login
+// Redirect /home to /dashboard
 Route::get('/home', function () {
     return redirect()->route('dashboard');
-})->middleware(['auth', 'verified'])->name('home');
+})->middleware(['auth', 'verified']);

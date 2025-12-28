@@ -32,6 +32,22 @@ class ProfileController extends Controller
             $request->user()->email_verified_at = null;
         }
 
+        //START OF NEW CODE: Handle Profile Picture Upload
+        if ($request->hasFile('profile_photo')) {
+            
+            // 1. Validate the image (Max 2MB, must be jpg/png)
+            $request->validate([
+                'profile_photo' => 'image|mimes:jpeg,png,jpg,gif|max:2048',
+            ]);
+
+            // 2. Store the image in the 'public' folder
+            $path = $request->file('profile_photo')->store('profile_photos', 'public');
+
+            // 3. Save the file path to the user's database column
+            $request->user()->profile_photo = $path;
+        }
+        //END OF NEW CODE
+
         $request->user()->save();
 
         return Redirect::route('profile.edit')->with('status', 'profile-updated');

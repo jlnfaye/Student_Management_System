@@ -4,9 +4,12 @@ namespace App\Http\Controllers;
 
 use App\Models\Student;
 use App\Models\SchoolClass;
+use App\Models\ActivityLog;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\Rule;
+use Illuminate\Support\Facades\Storage;
 
 class StudentController extends Controller
 {
@@ -17,12 +20,13 @@ class StudentController extends Controller
     {
         $query = Student::query()->with('class');
 
-        // Search by name, email, or address
+        // Search by name, email, address, OR Student ID
         if ($search = $request->input('search')) {
             $query->where(function ($q) use ($search) {
                 $q->where('name', 'like', "%{$search}%")
                   ->orWhere('email', 'like', "%{$search}%")
-                  ->orWhere('address', 'like', "%{$search}%");
+                  ->orWhere('address', 'like', "%{$search}%")
+                  ->orWhere('student_id_number', 'like', "%{$search}%"); // <--- Added ID Search
             });
         }
 
@@ -45,6 +49,12 @@ class StudentController extends Controller
 
         $students = $query->paginate(10)->appends($request->query());
 
+        // --- NEW: AJAX Check for Live Search ---
+        if ($request->ajax()) {
+            return view('students.partials.table', compact('students'))->render();
+        }
+        // ---------------------------------------
+
         $classes = SchoolClass::all();
 
         return view('students.index', compact('students', 'search', 'sort', 'direction', 'classes', 'classId'));
@@ -65,15 +75,33 @@ class StudentController extends Controller
     public function store(Request $request)
     {
         $validated = $request->validate([
+            // Enforce exactly 7 digits and uniqueness
+            'student_id_number' => 'required|numeric|digits:7|unique:students,student_id_number', 
             'name'      => 'required|string|max:255',
             'email'     => 'required|email|unique:students,email',
             'age'       => 'required|integer|min:16|max:100',
             'birthday'  => 'nullable|date|before_or_equal:today',
             'address'   => 'nullable|string|max:500',
             'class_id'  => 'nullable|exists:classes,id',
+            'student_photo' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
         ]);
 
-        Student::create($validated);
+        // Handle Image Upload
+        if ($request->hasFile('student_photo')) {
+            $path = $request->file('student_photo')->store('student_photos', 'public');
+            $validated['student_photo'] = $path;
+        }
+
+        // Save Student
+        $student = Student::create($validated);
+
+        // --- RECORD ACTIVITY LOG ---
+        ActivityLog::create([
+            'user_id' => Auth::id(),
+            'action'  => 'Created Student',
+            'description' => 'Added new student: ' . $student->name . ' (ID: ' . $student->student_id_number . ')',
+        ]);
+        // ---------------------------
 
         return redirect()->route('students.index')
             ->with('success', 'Student created successfully.');
@@ -89,12 +117,14 @@ class StudentController extends Controller
         if (request()->expectsJson()) {
             return response()->json([
                 'id'        => $student->id,
+                'student_id_number' => $student->student_id_number,
                 'name'      => $student->name,
                 'email'     => $student->email,
                 'age'       => $student->age,
                 'birthday'  => $student->birthday ? $student->birthday->format('d M Y') : null,
                 'address'   => $student->address,
                 'class'     => $student->class ? $student->class : null,
+                'student_photo' => $student->student_photo ? asset('storage/' . $student->student_photo) : null,
             ]);
         }
 
@@ -116,6 +146,8 @@ class StudentController extends Controller
     public function update(Request $request, Student $student)
     {
         $validated = $request->validate([
+            // Enforce 7 digits, but ignore this student's own ID
+            'student_id_number' => 'required|numeric|digits:7|unique:students,student_id_number,' . $student->id,
             'name'      => 'required|string|max:255',
             'email'     => [
                 'required',
@@ -126,9 +158,29 @@ class StudentController extends Controller
             'birthday'  => 'nullable|date|before_or_equal:today',
             'address'   => 'nullable|string|max:500',
             'class_id'  => 'nullable|exists:classes,id',
+            'student_photo' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
         ]);
 
+        // Handle Image Upload during Update
+        if ($request->hasFile('student_photo')) {
+            // Delete old photo if it exists
+            if ($student->student_photo) {
+                Storage::disk('public')->delete($student->student_photo);
+            }
+            
+            $path = $request->file('student_photo')->store('student_photos', 'public');
+            $validated['student_photo'] = $path;
+        }
+
         $student->update($validated);
+
+        // --- RECORD ACTIVITY LOG ---
+        ActivityLog::create([
+            'user_id' => Auth::id(),
+            'action'  => 'Updated Student',
+            'description' => 'Updated details for: ' . $student->name,
+        ]);
+        // ---------------------------
 
         return redirect()->route('students.index')
             ->with('success', 'Student updated successfully.');
@@ -139,7 +191,22 @@ class StudentController extends Controller
      */
     public function destroy(Student $student)
     {
+        $name = $student->name; // Save name for the log
+
+        // Delete photo when student is deleted
+        if ($student->student_photo) {
+            Storage::disk('public')->delete($student->student_photo);
+        }
+
         $student->delete();
+
+        // --- RECORD ACTIVITY LOG ---
+        ActivityLog::create([
+            'user_id' => Auth::id(),
+            'action'  => 'Deleted Student',
+            'description' => 'Deleted student: ' . $name,
+        ]);
+        // ---------------------------
 
         return redirect()->route('students.index')
             ->with('success', 'Student deleted successfully.');
@@ -160,9 +227,28 @@ class StudentController extends Controller
             'student_ids.*' => 'exists:students,id',
         ]);
 
+        $count = count($request->student_ids); // Count for the log
+
         DB::transaction(function () use ($request) {
+            // Fetch students first to delete their photos
+            $studentsToDelete = Student::whereIn('id', $request->student_ids)->get();
+            
+            foreach ($studentsToDelete as $student) {
+                if ($student->student_photo) {
+                    Storage::disk('public')->delete($student->student_photo);
+                }
+            }
+
             Student::whereIn('id', $request->student_ids)->delete();
         });
+
+        // --- RECORD ACTIVITY LOG (Bulk) ---
+        ActivityLog::create([
+            'user_id' => Auth::id(),
+            'action'  => 'Bulk Deleted',
+            'description' => 'Deleted ' . $count . ' students via bulk action.',
+        ]);
+        // ----------------------------------
 
         return redirect()->route('students.index')
             ->with('success', 'Selected students deleted successfully.');
